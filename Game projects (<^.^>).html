@@ -1,0 +1,416 @@
+<!doctype html>
+<html>
+ <head> 
+ <title> (<^.^>). </title> 
+  <meta charset="UTF-8"> 
+  <meta name="viewport" content="width=device-width, initial-scale=1"> 
+ </head> 
+ <body style="margin: 0;"> 
+  <canvas id="appRoot"></canvas> 
+  <script>
+// PolyCrush, © Brice Hirst, 2021. Requires ES6.
+window.onload = function() {
+    "strict mode";
+    const {sin, cos, PI} = Math;
+    function Style(fill, border) {
+        return {
+            drawPath(ctx) {
+                ctx.fillStyle = fill;
+                ctx.lineWidth = border;
+                ctx.fill();
+                ctx.stroke();
+            },
+            padding() {return border / 2;}
+        };
+    }
+    const SHAPE_STYLES = [
+        Style("#fff", 1),
+        Style("#ccc", 2),
+        Style("#888", 2)
+    ];
+    function Polygon(density, nsides, r, x, y, theta, vx, vy, omega) {
+        let dtheta = 2 * PI / nsides;
+        let m = density * r * r / 2 * nsides * sin(dtheta);
+        let style = SHAPE_STYLES[(density > 0) + (density > 1)];
+        function vertex(i, rp) {
+            let A = theta + i * dtheta;
+            return [x + rp * cos(A), y + rp * sin(A)];
+        }
+        function relAngle(px, py) {
+            return Math.atan2(py - y, px - x) - theta;
+        }
+        return {
+            advance(t) {
+                x += vx * t;
+                y += vy * t;
+                theta += omega * t;
+            },
+            applyImpulse(dvx, dvy, px, py) {
+                // (px, py) is the point of impact.
+                // May be useful in the future for applying torque.
+                vx += dvx;
+                vy += dvy;
+            },
+            center() {return [x, y];},
+            velocity() {return [vx, vy];},
+            mass() {return m;},
+            contains(px, py) {
+                let d = Math.hypot(px - x, py - y);
+                if (d > r) {
+                    return false;
+                }
+                let C = ((relAngle(px, py) % dtheta) + dtheta) % dtheta;
+                let B = dtheta / 2;
+                return (d <= r * cos(B) / cos(C - B));
+            },
+            vertexNear(px, py) {
+                let i = Math.round(relAngle(px, py) / dtheta);
+                return vertex(i, r);
+            },
+            normalNear(px, py) {
+                let i = Math.floor(relAngle(px, py) / dtheta);
+                let A = theta + (i + 0.5) * dtheta;
+                return [cos(A), sin(A)];
+            },
+            draw(ctx) {
+                let rp = r - style.padding();
+                ctx.beginPath();
+                ctx.moveTo(...vertex(0, rp));
+                for (let i = 1; i < nsides; i++) {
+                    ctx.lineTo(...vertex(i, rp));
+                }
+                ctx.closePath();
+                style.drawPath(ctx);
+            }
+        };
+    }
+    function PolyField(w, h) {
+        let shapes = [];
+        function tryReflect(s) {
+            let [x, y] = s.center();
+            let [vx, vy] = s.velocity();
+            let [outerX, py] = s.vertexNear((vx < 0 ? 0 : w), y);
+            if ((vx < 0 && outerX < 0) || (vx > 0 && outerX > w)) {
+                s.applyImpulse(-2 * vx, 0, outerX, py);
+            }
+            let [px, outerY] = s.vertexNear(x, (vy < 0 ? 0 : h));
+            if ((vy < 0 && outerY < 0) || (vy > 0 && outerY > h)) {
+                s.applyImpulse(0, -2 * vy, px, outerY);
+            }
+        }
+        function tryCollide(s1, s2) {
+            let [x1, y1] = s1.center();
+            let [x2, y2] = s2.center();
+            let [px, py] = s1.vertexNear(x2, y2);
+            if (!s2.contains(px, py)) {
+                return;
+            }
+            let [nx, ny] = s2.normalNear(px, py);
+            let [vx1, vy1] = s1.velocity();
+            let [vx2, vy2] = s2.velocity();
+            let rdot = nx * (x2 - x1) + ny * (y2 - y1);
+            let vdot = nx * (vx2 - vx1) + ny * (vy2 - vy1);
+            if (rdot * vdot > 0) {
+                return;
+            }
+            let m1 = s1.mass();
+            let m2 = s2.mass();
+            let dv1 = 2 * vdot * m2 / (m1 + m2);
+            let dv2 = -2 * vdot * m1 / (m1 + m2);
+            s1.applyImpulse(dv1 * nx, dv1 * ny, px, py);
+            s2.applyImpulse(dv2 * nx, dv2 * ny, px, py);
+        }
+        function isOverCircle(s, cx, cy, r) {
+            let [x, y] = s.center();
+            let A = Math.atan2(y - cy, x - cx);
+            if (s.contains(cx + r * cos(A), cy + r * sin(A))) {
+                return true;
+            }
+            let [px, py] = s.vertexNear(cx, cy);
+            return (Math.hypot(py - cy, px - cx) < r);
+        }
+        return {
+            advance(t) {
+                shapes.forEach(s => s.advance(t));
+                for (let s1 of shapes) {
+                    tryReflect(s1);
+                    for (let s2 of shapes) {
+                        if (s1 !== s2) {
+                            tryCollide(s1, s2);
+                        }
+                    }
+                }
+            },
+            add(s) {shapes.push(s);},
+            anyOverCircle(cx, cy, r) {
+                return shapes.some(s => isOverCircle(s, cx, cy, r));
+            },
+            draw(ctx) {shapes.forEach(s => s.draw(ctx));}
+        };
+    }
+    const LAVA_COLORS = ["#fc0", "#f40"];
+    const FLOOR_STYLE = Style("#4a8", 3);
+    function Arena(w, h, cr) {
+        let cd = 2 * cr;
+        return {
+            hasLavaAt(x, y) {
+                x = (x > w / 2) ? w - x : x;
+                y = (y > h / 2) ? h - y : y;
+                if (x < cr || y < cr) {
+                    return true;
+                }
+                x -= cd;
+                y -= cd;
+                return (x <= 0 && y <= 0 && Math.hypot(x, y) > cr);
+            },
+            draw(ctx) {
+                let grad = ctx.createLinearGradient(0, 0, w, 0);
+                let [start, end] = LAVA_COLORS;
+                grad.addColorStop(0, end);
+                grad.addColorStop(.5, start);
+                grad.addColorStop(1, end);
+                ctx.fillStyle = grad;
+                ctx.fillRect(0, 0, w, h);
+                ctx.beginPath();
+                ctx.moveTo(cd, cr);
+                ctx.lineTo(w - cd, cr);
+                ctx.arcTo(w - cr, cr, w - cr, cd, cr);
+                ctx.lineTo(w - cr, h - cd);
+                ctx.arcTo(w - cr, h - cr, w - cd, h - cr, cr);
+                ctx.lineTo(cd, h - cr);
+                ctx.arcTo(cr, h - cr, cr, h - cd, cr);
+                ctx.lineTo(cr, cd);
+                ctx.arcTo(cr, cr, cd, cr, cr);
+                ctx.closePath();
+                FLOOR_STYLE.drawPath(ctx);
+            }
+        };
+    }
+    const PLAYER_STYLES = {
+        normal:   {outer: 1,   inner: 0.4,  colors: ["#00f", "#77f"]},
+        squished: {outer: 1.2, inner: 0.3,  colors: ["#77f", "#77f"]},
+        burned:   {outer: 0.9, inner: 0.36, colors: ["#500", "#a33"]}
+    };
+    function Player(cx, cy, r) {
+        let status = "normal";
+        return {
+            moveTo(x, y) {
+                cx = x;
+                cy = y;
+            },
+            checkThreats(field, arena) {
+                if (field.anyOverCircle(cx, cy, r)) {
+                    status = "squished";
+                } else if (arena.hasLavaAt(cx, cy)) {
+                    status = "burned";
+                }
+            },
+            isAlive() {return (status == "normal");},
+            draw(ctx) {
+                let style = PLAYER_STYLES[status];
+                let ro = r * style.outer;
+                let ri = r * style.inner;
+                let grad = ctx.createRadialGradient(cx, cy, ri, cx, cy, ro);
+                let [co, ci] = style.colors;
+                grad.addColorStop(0, co);
+                grad.addColorStop(.5, ci);
+                grad.addColorStop(1, co);
+                ctx.fillStyle = grad;
+                ctx.lineWidth = 5 * style.inner;
+                ctx.beginPath();
+                ctx.ellipse(cx, cy, ro, ro, 0, 0, 2 * PI);
+                ctx.stroke();
+                ctx.ellipse(cx, cy, ri, ri, 0, 0, 2 * PI, true);
+                ctx.stroke();
+                ctx.fill();
+            }
+        };
+    }
+    const DENSITY_DISTR = [1, 1, 1, 1, 1, 1, 1, 8];
+    const NSIDES_DISTR = [3, 3, 4, 4, 5, 6, 6, 8];
+    const RSCALE_RANGE = [0.06, 0.12];
+    const VSCALE_RANGE = [0.3, 0.5];
+    const OMEGA_MULT = 0.4;
+    const SYMBOL_RADIUS = 8;
+    const SYMBOL_SPACING = 18;
+    const PROGRESS_HEIGHT = 8;
+    const PROGRESS_STYLE = Style("#fff", 1);
+    function PolySpawner(w, h, scale, rate) {
+        let symbols = [];
+        let queue = [];
+        let tTotal = 0;
+        function progress() {
+            return rate * Math.sqrt(tTotal);
+        }
+        function nShapes() {
+            return Math.floor(progress());
+        }
+        function sampleArray(items) {
+            return items[Math.floor(Math.random() * items.length)];
+        }
+        function sampleRange(min, max) {
+            return Math.random() * (max - min) + min;
+        }
+        function addSymbol(nsides) {
+            let r = SYMBOL_RADIUS;
+            let theta = (PI / 2) - (PI / nsides);
+            let spc = SYMBOL_SPACING;
+            let x = spc * (symbols.length + 0.5);
+            let y = spc * 0.5;
+            if (nsides % 2) {
+                y += r * (1 - sin(theta)) / 2;
+            }
+            let s = Polygon(0, nsides, r, x, y, theta, 0, 0, 0);
+            symbols.push(s);
+        }
+        function spawnPolygon() {
+            let density = sampleArray(DENSITY_DISTR);
+            let nsides = sampleArray(NSIDES_DISTR);
+            let r = sampleRange(...RSCALE_RANGE) * scale;
+            let v0 = sampleRange(...VSCALE_RANGE) * scale;
+            let theta = sampleRange(-PI, PI);
+            let d = Math.hypot(w, h) / 2 + r;
+            let x = w / 2 + d * cos(theta);
+            let y = h / 2 + d * sin(theta);
+            let vx = v0 * -cos(theta);
+            let vy = v0 * -sin(theta);
+            let omega = sampleArray([-1, 1]) * OMEGA_MULT * v0 / r;
+            let s = Polygon(density, nsides, r, x, y, theta, vx, vy, omega);
+            queue.push(s);
+            addSymbol(nsides);
+        }
+        return {
+            advance(t) {
+                let n1 = nShapes();
+                tTotal += t;
+                let n2 = nShapes();
+                while (n2 > n1++) {
+                    spawnPolygon();
+                }
+            },
+            getAll() {
+                let last = queue;
+                queue = [];
+                return last;
+            },
+            draw(ctx) {
+                let style = PROGRESS_STYLE;
+                let barW = w * (progress() - nShapes());
+                let barH = PROGRESS_HEIGHT;
+                ctx.beginPath();
+                ctx.rect(0, 0, barW, barH);
+                style.drawPath(ctx);
+                ctx.save();
+                ctx.translate(0, barH + style.padding());
+                symbols.forEach(s => s.draw(ctx));
+                ctx.restore();
+            }
+        };
+    }
+    const SHADE_FADERATE = 0.5;
+    const SHADE_MAXALPHA = 0.4;
+    function Shade(w, h, message) {
+        let alpha = 0;
+        return {
+            advance(t) {alpha += t * SHADE_FADERATE;},
+            draw(ctx) {
+                ctx.save();
+                ctx.globalAlpha *= Math.min(alpha, SHADE_MAXALPHA);
+                ctx.fillStyle = "#000";
+                ctx.fillRect(0, 0, w, h);
+                ctx.restore();
+                ctx.fillStyle = "#fff";
+                ctx.font = "24px serif";
+                ctx.textAlign = "center";
+                ctx.fillText(message, w / 2, h - 50, w);
+            }
+        };
+    }
+    const LAVA_MARGIN_BASE = 0.05;
+    const PLAYER_RADIUS_BASE = 0.025;
+    const SPAWN_RATE_BASE = 0.5;
+    function Game(w, h) {
+        let field = PolyField(w, h);
+        let scale = Math.min(w, h);
+        let arena = Arena(w, h, LAVA_MARGIN_BASE * scale);
+        let player = Player(w / 2, h / 2, PLAYER_RADIUS_BASE * scale);
+        let spawnRate = SPAWN_RATE_BASE * Math.max(w / h, h / w);
+        let spawner = PolySpawner(w, h, scale, spawnRate);
+        let shade = Shade(w, h, "click to try again");
+        return {
+            advance(t) {
+                field.advance(t);
+                if (player.isAlive()) {
+                    player.checkThreats(field, arena);
+                    spawner.advance(t);
+                    spawner.getAll().forEach(s => field.add(s));
+                } else {
+                    shade.advance(t);
+                }
+            },
+            touch(x, y) {
+                if (player.isAlive()) {
+                    player.moveTo(x, y);
+                }
+            },
+            isOver() {return !player.isAlive();},
+            draw(ctx) {
+                arena.draw(ctx);
+                player.draw(ctx);
+                field.draw(ctx);
+                spawner.draw(ctx);
+                if (!player.isAlive()) {
+                    shade.draw(ctx);
+                }
+            }
+        };
+    }
+    const TS_MAX = 0.2;
+    const FRAME_STYLE = Style("#fff", 3);
+    function startApp(canvasID, margin) {
+        let canvas = document.getElementById(canvasID);
+        let w = canvas.width = window.innerWidth;
+        let h = canvas.height = window.innerHeight;
+        let iw = w - 2 * margin;
+        let ih = h - 2 * margin;
+        let ctx = canvas.getContext("2d");
+        ctx.translate(margin, margin);
+        let style = FRAME_STYLE;
+        let pad = style.padding();
+        ctx.beginPath();
+        ctx.rect(-pad, -pad, iw + 2 * pad, ih + 2 * pad);
+        style.drawPath(ctx);
+        ctx.beginPath();
+        ctx.rect(0, 0, iw, ih);
+        ctx.clip();
+        let game = Game(iw, ih);
+        function onPointerMove(evt) {
+            game.touch(evt.clientX - margin, evt.clientY - margin);
+        }
+        function onPointerDown(evt) {
+            if (game.isOver()) {
+                game = Game(iw, ih);
+            }
+            onPointerMove(evt);
+        }
+        canvas.style.touchAction = "none";
+        canvas.addEventListener("pointermove", onPointerMove, false);
+        canvas.addEventListener("pointerdown", onPointerDown, false);
+        let lastTimestamp = 0;
+        function run(tsMillis) {
+            let timestamp = tsMillis / 1000;
+            if (lastTimestamp) {
+                let t = Math.min(timestamp - lastTimestamp, TS_MAX);
+                game.advance(t);
+            }
+            lastTimestamp = timestamp;
+            game.draw(ctx);
+            window.requestAnimationFrame(run);
+        }
+        run(0);
+    }
+    startApp("appRoot", 12);
+};
+    </script> 
+ </body>
+</html>
